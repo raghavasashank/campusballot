@@ -175,6 +175,19 @@ might need either, both, or neither, depending on what it's actually guarding ag
   swap this for a shared store (Redis/Upstash) before relying on it — don't assume it degrades
   gracefully, it just quietly becomes less effective.
 
+- **Email sender is an unauthenticated free-domain address** (`campusballot.noreply@gmail.com` via
+  Brevo's shared sending infrastructure, no custom domain). Gmail/Yahoo/Outlook's 2024+ bulk-sender
+  requirements treat mail from an unauthenticated free domain as suspicious regardless of which
+  relay sends it (confirmed hitting this with direct SMTP, Resend, and Brevo in turn) — expect
+  intermittent deferrals, rate-limiting (`421-4.7.28` from Gmail), or silent drops, worse under
+  burst volume (many students signing in around the same time is exactly the pattern that trips
+  it hardest). Accepted for now during testing; **before running a real election**, buy a cheap
+  domain (~$10-15/yr) and authenticate it in Brevo (SPF/DKIM/DMARC) — an authenticated sender has
+  its own reputation with Gmail/Yahoo/Outlook and isn't affected by this. Since student email is
+  `@aurora.edu.in`, likely itself hosted on Google Workspace or Microsoft 365, this restriction
+  plausibly applies to real recipients too, not just the Gmail account used for testing — don't
+  assume it's only a test-account problem.
+
 ## Rejected alternatives (for reference)
 - **Single-use voting tokens** (issue token at auth, redeem later): correctly solves the same timing
   problem as batching, but adds a separate token-issuance/redemption subsystem. Not worth the added
