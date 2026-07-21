@@ -2,21 +2,40 @@
 
 import { useState } from "react";
 import { ShieldCheck, Vote } from "lucide-react";
-import { Card, Button, Label, Input } from "@/components/ui";
+import { Card, Button, Label, Input, ErrorAlert } from "@/components/ui";
+
+const REQUEST_TIMEOUT_MS = 20_000;
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent">("idle");
+  const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setStatus("sending");
-    await fetch("/api/auth/request-link", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    setStatus("sent");
+    setError(null);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const res = await fetch("/api/auth/request-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+        signal: controller.signal,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error ?? "Couldn't send the sign-in link. Try again.");
+      setStatus("sent");
+    } catch (err) {
+      const timedOut = err instanceof Error && err.name === "AbortError";
+      setError(timedOut ? "That took too long. Please try again." : "Couldn't send the sign-in link. Try again.");
+      setStatus("idle");
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   return (
@@ -42,6 +61,7 @@ export default function LoginPage() {
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-3">
+            <ErrorAlert message={error} />
             <div>
               <Label htmlFor="email">Institutional email</Label>
               <Input
