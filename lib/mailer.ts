@@ -1,47 +1,42 @@
-import nodemailer from "nodemailer";
-
-// Falls back to console-logging if SMTP isn't configured — keeps local dev
-// working without credentials, but real delivery needs SMTP_HOST/PORT/USER/PASS.
-//
-// Port note: some cloud platforms block outbound SMTP on port 587 (STARTTLS)
-// but allow 465 (implicit TLS) — if 587 times out (ETIMEDOUT at the
-// connection stage, before auth even runs), try 465 before giving up on SMTP
-// entirely. See ARCHITECTURE.md / README for the Resend (HTTP API) fallback
-// if the whole platform blocks outbound SMTP regardless of port.
-let transporter: ReturnType<typeof nodemailer.createTransport> | null = null;
-
-function getTransporter() {
-  if (transporter) return transporter;
-  if (!process.env.SMTP_HOST) return null;
-
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    secure: process.env.SMTP_PORT === "465",
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    // nodemailer's defaults (10 min socket timeout) leave a user staring at
-    // "Sending…" for ages if the host can't reach the SMTP server (blocked
-    // egress port, network hiccup, etc.) — fail fast instead.
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 15_000,
-  });
-  return transporter;
-}
+// Brevo (formerly Sendinblue) sends over HTTPS, not SMTP — deliberate, since
+// cloud platforms often block outbound SMTP ports as an anti-spam measure
+// (see ARCHITECTURE.md). Chosen over Resend/SendGrid specifically because:
+// Resend requires a verified domain (no shared test-sender fallback on this
+// account), SendGrid dropped its free tier — Brevo verifies a single sender
+// *email* (not a domain) on a genuinely free plan. ponytail: plain fetch
+// against Brevo's REST API, no SDK needed for one endpoint.
+// Falls back to console-logging if unconfigured, so local dev keeps working
+// without an API key.
+const BREVO_ENDPOINT = "https://api.brevo.com/v3/smtp/email";
 
 export async function sendEmail(to: string, subject: string, body: string) {
-  const t = getTransporter();
-  if (!t) {
-    console.log(`[mailer] SMTP not configured, logging instead. To: ${to} | Subject: ${subject}\n${body}`);
+  const apiKey = process.env.BREVO_API_KEY;
+  const from = process.env.BREVO_FROM;
+
+  if (!apiKey || !from) {
+    console.log(`[mailer] BREVO_API_KEY/BREVO_FROM not configured, logging instead. To: ${to} | Subject: ${subject}\n${body}`);
     return;
   }
 
-  await t.sendMail({
-    from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
-    to,
-    subject,
-    text: body,
+  const res = await fetch(BREVO_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "api-key": apiKey,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      sender: { email: from },
+      to: [{ email: to }],
+      subject,
+      textContent: body,
+    }),
   });
+
+  if (!res.ok) {
+    const errorBody = await res.text().catch(() => "");
+    throw new Error(`Failed to send email via Brevo (${res.status}): ${errorBody}`);
+  }
 }
 
 export async function sendMagicLinkEmail(email: string, link: string) {
