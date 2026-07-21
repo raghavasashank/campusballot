@@ -1,0 +1,221 @@
+// CampusBallot data model — see /ARCHITECTURE.md for the full design rationale.
+// Two roles only (SCOPE.md): ADMIN (merged admin + super admin) and VOTER (student).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  VOTER
+}
+
+enum ElectionStatus {
+  DRAFT
+  SCHEDULED
+  OPEN
+  CLOSED
+  RESULTS_PUBLISHED
+}
+
+enum CandidateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// One row per person. Auth identity is the institutional email; role decides
+// admin vs voter — no separate super-admin, see SCOPE.md.
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  role      Role     @default(VOTER)
+  createdAt DateTime @default(now())
+
+  loginTokens           LoginToken[]
+  sessions              Session[]
+  eligibleFor           EligibleVoter[]
+  voterStatuses         VoterStatus[]
+  auditLogEntries       AuditLog[]
+  candidateApplications Candidate[]
+}
+
+// Single-use magic-link/OTP token. Consumed once, then marked used — this is
+// the auth mechanism, not a session; the session itself is a signed cookie.
+model LoginToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// Server-side session record — the signed cookie only carries this row's id,
+// never the role/exp directly, so revocation takes effect on the very next
+// request rather than waiting for a cookie to expire or refresh. One row per
+// login, so a single device/session can be killed without touching others.
+model Session {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  @@index([userId])
+}
+
+model Election {
+  id        String         @id @default(uuid())
+  name      String
+  status    ElectionStatus @default(DRAFT)
+  opensAt   DateTime?
+  closesAt  DateTime?
+  createdAt DateTime       @default(now())
+
+  positions      Position[]
+  eligibleVoters EligibleVoter[]
+  voterStatuses  VoterStatus[]
+  pendingBallots PendingBallot[]
+  ballots        Ballot[]
+  batches        Batch[]
+}
+
+model Position {
+  id         String   @id @default(uuid())
+  electionId String
+  election   Election @relation(fields: [electionId], references: [id])
+  title      String
+
+  candidates     Candidate[]
+  voterStatuses  VoterStatus[]
+  pendingBallots PendingBallot[]
+  ballots        Ballot[]
+  batches        Batch[]
+
+  @@index([electionId])
+}
+
+// A candidacy starts as an application (by the student themselves) and needs
+// admin approval before it can appear on a ballot — see SCOPE.md candidate
+// management.
+model Candidate {
+  id          String          @id @default(uuid())
+  positionId  String
+  position    Position        @relation(fields: [positionId], references: [id])
+  applicantId String
+  applicant   User            @relation(fields: [applicantId], references: [id])
+  name        String
+  bio         String?
+  photoUrl    String?
+  status      CandidateStatus @default(PENDING)
+  appliedAt   DateTime        @default(now())
+  reviewedAt  DateTime?
+
+  pendingBallots PendingBallot[]
+  ballots        Ballot[]
+
+  @@unique([positionId, applicantId])
+  @@index([positionId])
+}
+
+// Eligibility list per election — separate from Role so eligibility doesn't
+// have to mean "is a voter globally," just "may vote in this election."
+model EligibleVoter {
+  id         String   @id @default(uuid())
+  electionId String
+  election   Election @relation(fields: [electionId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@unique([electionId, userId])
+}
+
+// The atomic one-vote-per-position gate (requirement 1). Flipped synchronously
+// on vote submission — must never be touched by the batch/shuffle job.
+model VoterStatus {
+  id         String    @id @default(uuid())
+  electionId String
+  election   Election  @relation(fields: [electionId], references: [id])
+  positionId String
+  position   Position  @relation(fields: [positionId], references: [id])
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  hasVoted   Boolean   @default(false)
+  votedAt    DateTime?
+
+  @@unique([electionId, positionId, userId])
+}
+
+// Ephemeral queue: ballot content lands here immediately, with no student
+// reference. Drained by the batch worker into `Ballot` on a delay, so ballot
+// insertion timing can't be correlated back to a VoterStatus flip.
+model PendingBallot {
+  id          String    @id @default(uuid())
+  electionId  String
+  election    Election  @relation(fields: [electionId], references: [id])
+  positionId  String
+  position    Position  @relation(fields: [positionId], references: [id])
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id])
+  queuedAt    DateTime  @default(now())
+
+  @@index([electionId, positionId])
+}
+
+// Immutable ballot record. No student reference, ever. Random UUID id (never
+// sequential), and timestamp precision is the batch window, not per-row.
+model Ballot {
+  id          String    @id @default(uuid())
+  electionId  String
+  election    Election  @relation(fields: [electionId], references: [id])
+  positionId  String
+  position    Position  @relation(fields: [positionId], references: [id])
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id])
+  batchId     String
+  batch       Batch     @relation(fields: [batchId], references: [id])
+
+  @@index([electionId, positionId])
+}
+
+// One row per batch flush. Publishes the hash chain that makes the tally
+// independently auditable (requirement 3).
+model Batch {
+  id            String    @id @default(uuid())
+  electionId    String
+  election      Election  @relation(fields: [electionId], references: [id])
+  positionId    String
+  position      Position  @relation(fields: [positionId], references: [id])
+  windowStart   DateTime
+  windowEnd     DateTime
+  publishedHash String?
+  publishedAt   DateTime?
+
+  ballots Ballot[]
+
+  @@index([electionId, positionId])
+}
+
+// Append-only log of every state-changing admin action. This is the
+// accountability mechanism that substitutes for a separate super-admin role
+// (see SCOPE.md) — never update or delete rows here, only insert.
+model AuditLog {
+  id        String   @id @default(uuid())
+  actorId   String
+  actor     User     @relation(fields: [actorId], references: [id])
+  action    String
+  target    String?
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+}
