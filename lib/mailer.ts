@@ -1,41 +1,33 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
-// Falls back to console-logging if SMTP isn't configured — keeps local dev
-// working without credentials, but real delivery needs SMTP_HOST/PORT/USER/PASS.
-let transporter: ReturnType<typeof nodemailer.createTransport> | null = null;
+// Resend sends over HTTPS (port 443), not raw SMTP — cloud platforms often
+// block or restrict outbound SMTP ports (25/465/587) as an anti-spam
+// measure, which is what made the earlier nodemailer/SMTP approach fail
+// with ETIMEDOUT on Render. Falls back to console-logging if RESEND_API_KEY
+// isn't set, so local dev keeps working without an API key.
+let client: Resend | null = null;
 
-function getTransporter() {
-  if (transporter) return transporter;
-  if (!process.env.SMTP_HOST) return null;
-
-  transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    secure: process.env.SMTP_PORT === "465",
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    // nodemailer's defaults (10 min socket timeout) leave a user staring at
-    // "Sending…" for ages if the host can't reach the SMTP server (blocked
-    // egress port, network hiccup, etc.) — fail fast instead.
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 15_000,
-  });
-  return transporter;
+function getClient() {
+  if (client) return client;
+  if (!process.env.RESEND_API_KEY) return null;
+  client = new Resend(process.env.RESEND_API_KEY);
+  return client;
 }
 
 export async function sendEmail(to: string, subject: string, body: string) {
-  const t = getTransporter();
-  if (!t) {
-    console.log(`[mailer] SMTP not configured, logging instead. To: ${to} | Subject: ${subject}\n${body}`);
+  const resend = getClient();
+  if (!resend) {
+    console.log(`[mailer] RESEND_API_KEY not configured, logging instead. To: ${to} | Subject: ${subject}\n${body}`);
     return;
   }
 
-  await t.sendMail({
-    from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
+  const { error } = await resend.emails.send({
+    from: process.env.RESEND_FROM ?? "CampusBallot <onboarding@resend.dev>",
     to,
     subject,
     text: body,
   });
+  if (error) throw new Error(`Failed to send email via Resend: ${error.message}`);
 }
 
 export async function sendMagicLinkEmail(email: string, link: string) {
