@@ -33,7 +33,11 @@ export async function POST(request: NextRequest) {
   const isAdminEmail = adminEmails.includes(normalized);
 
   if (!isEligibleEmail(normalized, process.env.ALLOWED_EMAIL_DOMAIN!, adminEmails)) {
-    // Don't create a token or reveal the domain check failed — same response as success.
+    // Server-side only — the client always gets the same generic response
+    // either way, so this doesn't leak anything to whoever's making the
+    // request, but it makes the "why didn't an email arrive" question
+    // answerable from the Render logs instead of guesswork.
+    console.log(`[request-link] rejected ${normalized}: not on allowed domain or admin list`);
     return GENERIC_OK();
   }
 
@@ -50,6 +54,7 @@ export async function POST(request: NextRequest) {
 
   const link = `${request.nextUrl.origin}/api/auth/verify?token=${raw}`;
   await sendMagicLinkEmail(normalized, link);
+  console.log(`[request-link] sent to ${normalized}`);
 
   return GENERIC_OK();
 }
